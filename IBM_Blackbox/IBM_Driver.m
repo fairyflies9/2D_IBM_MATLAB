@@ -1,3 +1,28 @@
+%-------------------------------------------------------------------------------------------------------------------%
+%
+% IB2d is an Immersed Boundary Code (IB) for solving fully coupled non-linear 
+% 	fluid-structure interaction models. This version of the code is based off of
+%	Peskin's Immersed Boundary Method Paper in Acta Numerica, 2002.
+%
+% Author: Nicholas A. Battista
+% Email:  nick.battista@unc.edu
+% Date Created: May 27th, 2015
+% Institution: UNC-CH
+%
+% This code is capable of creating Lagrangian Structures using:
+% 	1. Springs
+% 	2. Beams (*torsional springs)
+% 	3. Target Points
+%	4. Muscle-Model (combined Force-Length-Velocity model, "HIll+(Length-Tension)")
+%
+% One is able to update those Lagrangian Structure parameters, e.g., spring constants, resting %%	lengths, etc
+% 
+% There are a number of built in Examples, mostly used for teaching purposes. 
+% 
+% If you would like us %to add a specific muscle model, please let Nick (nick.battista@unc.edu) know.
+%
+%--------------------------------------------------------------------------------------------------------------------%
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %
 % FUNCTION: Actual DRIVER of the code, where the time-stepping occurs ->
@@ -36,6 +61,16 @@ dx =   grid_Info(5); % Spatial-size in x
 dy =   grid_Info(6); % Spatial-size in y
 supp = grid_Info(7); % Delta-function support
 
+% PRINTING/PLOTTING INFO %
+pDump = grid_Info(8);           % Print (Plot) Dump interval
+pMatlab = grid_Info(9);         % Plot in Matlab? (1=YES,0=NO)
+lagPlot = grid_Info(10);        % Plot LAGRANGIAN PTs ONLY in Matlab
+velPlot = grid_Info(11);        % Plot LAGRANGIAN PTs + VELOCITY FIELD in Matlab
+vortPlot = grid_Info(12);       % Plot LAGRANGIAN PTs + VORTICITY colormap in Matlab
+pressPlot = grid_Info(13);      % Plot LAGRANGIAN PTs + MAGNITUDE OF VELOCITY colormap in Matlab
+uMagPlot = grid_Info(14);       % Plot LAGRANGIAN PTs + PRESSURE colormap in Matlab
+
+
 
 % MODEL STRUCTURE DATA STORED %
 springs_Yes = model_Info(1);         % Springs: 0 (for no) or 1 (for yes) 
@@ -45,6 +80,7 @@ update_Target_Pts = model_Info(4);   % Update_Target_Pts: 0 (for no) or 1 (for y
 beams_Yes = model_Info(5);           % Beams: 0 (for no) or 1 (for yes)
 update_Beams_Flag = model_Info(6);   % Update_Beams: 0 (for no) or 1 (for yes)
 muscles_Yes = model_Info(7);         % Muscles: 0 (for no) or 1 (for yes)
+arb_ext_force_Yes = model_Info(8);   % Arbitrary External Force: 0 (for no) or 1 (for yes)
 
 %Lagrangian Structure Data
 ds = Lx / (2*Nx);                   %Lagrangian Spacing
@@ -149,7 +185,28 @@ V = U;
 
 
 % ACTUAL TIME-STEPPING IBM SCHEME!
-ct = 0;
+cter = 0; ctsave = 1; firstPrint = 1; loc = 1; diffy = 1;
+
+
+% CREATE VIZ_IB2D FOLDER and VISIT FILES
+mkdir('viz_IB2d');
+cd('viz_IB2d');
+vizID = fopen('dumps.visit','w');
+fprintf(vizID,'!NBLOCKS 6\n');
+cd ..
+
+%Initialize Vorticity, uMagnitude, and Pressure for initial colormap
+%Print initializations to .vtk
+vort=zeros(Ny,Nx); uMag=vort; p = vort;  lagPts = [xLag yLag zeros(length(xLag),1)];
+connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag);
+print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat);
+
+
+%
+%
+% * * * * * * * * * * BEGIN TIME-STEPPING! * * * * * * * * * * *
+%
+%
 while current_time < T_FINAL
     
     % Step 1: Update Position of Boundary of membrane at half time-step
@@ -170,33 +227,428 @@ while current_time < T_FINAL
     
     
     % Step 2: Calculate Force coming from membrane at half time-step
-    [Fxh, Fyh] =       please_Find_Lagrangian_Forces_On_Eulerian_grid(dt, current_time, xLag_h, yLag_h, xLag_P, yLag_P, x, y, grid_Info, model_Info, springs_info, target_info, beams_info, muscles_info);
-   
+    [Fxh, Fyh] =           please_Find_Lagrangian_Forces_On_Eulerian_grid(dt, current_time, xLag_h, yLag_h, xLag_P, yLag_P, x, y, grid_Info, model_Info, springs_info, target_info, beams_info, muscles_info);
+    
+    if arb_ext_force_Yes == 1 
+        [Fx_Arb, Fy_Arb] = please_Compute_External_Forcing(dt, current_time, x, y, grid_Info, U, V);
+        Fxh = Fxh + Fx_Arb;
+        Fyh = Fyh + Fy_Arb;
+    end
+    
+    
     % Step 3: Solve for Fluid motion
-    [Uh, Vh, U, V] =   please_Update_Fluid_Velocity(U, V, Fxh, Fyh, rho, mu, grid_Info, dt);
+    [Uh, Vh, U, V, p] =   please_Update_Fluid_Velocity(U, V, Fxh, Fyh, rho, mu, grid_Info, dt);
 
     % Step 4: Update Position of Boundary of membrane again for a half time-step
     xLag_P = xLag_h;     % Stores old Lagrangian x-Values (for muscle model)
     yLag_P = yLag_h;     % Stores old Lagrangian y-Values (for muscle model)
     [xLag, yLag] =     please_Move_Lagrangian_Point_Positions(Uh, Vh, xLag, yLag, xLag_h, yLag_h, x, y, dt, grid_Info);
 
+    
+    
     % Plot Lagrangian/Eulerian Dynamics!
-    please_Plot_Results(dx,dy,X,Y,U,V,xLag,yLag);
-    
-    % Update current_time value
-    current_time = current_time+dt;
-    fprintf('Current Time(s): %d\n',current_time);
+    if ( ( mod(cter,pDump) == 0  ) && ( cter > pDump ) )
+        
+        %Compute vorticity, uMagnitude
+        vort = give_Me_Vorticity(U,V,dx,dy);
+        uMag = give_Me_Magnitude_Velocity(U,V);
+        
+        %Plot in Matlab
+        if pMatlab == 1
+            [loc, diffy] = please_Plot_Results(ds,X,Y,U,V,vort,uMag,p,xLag,yLag,lagPlot,velPlot,vortPlot,pressPlot,uMagPlot,firstPrint,loc,diffy);
+        end
+        
+        %Print .vtk files!
+        lagPts = [xLag yLag zeros(length(xLag),1)];
+        print_vtk_files(ctsave,vizID,vort,uMag',p',U',V',Lx,Ly,Nx,Ny,lagPts,connectsMat);
+        
+        %Print Current Time
+        fprintf('Current Time(s): %6.6f\n',current_time);
+        
+        ctsave=ctsave+1; firstPrint = 0;
+        
+    end
 
-    %ct = ct + 1;
-    %if mod(ct,125)==0
-    %    pause();
-    %end
     
+    % Update current_time value & counter
+    current_time = current_time+dt;
+    cter = cter + 1;
+    
+    
+end %ENDS TIME-STEPPING LOOP
+
+fclose(vizID);
+
+
+
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: gives appropriate string number for filename in printing the
+% .vtk files.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat)
+
+%Give spacing for grid
+dx = Lx/Nx; 
+dy = Ly/Ny;
+
+
+%Go into viz_IB2d directory
+cd('viz_IB2d');
+
+%Find string number for storing files
+strNUM = give_String_Number_For_VTK(ctsave);
+vortfName = ['Omega.' strNUM '.vtk'];
+uMagfName = ['uMag.' strNUM '.vtk'];
+pfName = ['P.' strNUM '.vtk'];
+uXName = ['uX.' strNUM '.vtk'];
+uYName = ['uY.' strNUM '.vtk'];
+velocityName = ['u.' strNUM '.vtk'];
+lagPtsName = ['lagsPts.' strNUM '.vtk'];
+lagPtsConName=['lagPtsConnect.' strNUM '.vtk'];
+
+
+%Print Lagrangian Pts to .vtk format
+savevtk_points(lagPts, lagPtsName, 'lagPts');
+
+%Print Lagrangian Pts w/ CONNECTIONS to .vtk format
+savevtk_points_connects(lagPts, lagPtsConName, 'lagPtsConnected',connectsMat);
+
+        
+%Print another cycle to .visit file
+fprintf(vizID,[vortfName '\n']);
+fprintf(vizID,[uMagfName '\n']);
+fprintf(vizID,[pfName '\n']);
+fprintf(vizID,[uXName '\n']);
+fprintf(vizID,[uYName '\n']);
+fprintf(vizID,[velocityName '\n']);
+
+
+%Print SCALAR DATA (i.e., colormap data) to .vtk file
+savevtk_scalar(vort, vortfName, 'Omega',dx,dy);
+savevtk_scalar(uMag, uMagfName, 'uMag',dx,dy);
+savevtk_scalar(p, pfName, 'P',dx,dy);
+savevtk_scalar(U, uXName, 'uX',dx,dy);
+savevtk_scalar(V, uYName, 'uY',dx,dy);
+
+%Print VECTOR DATA (i.e., velocity data) to .vtk file
+savevtk_vector(U, V, velocityName, 'u',dx,dy)
+
+%Get out of viz_IB2d folder
+cd ..
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: give me Connects Vector for printing Lagrangian .vtk info!
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag)
+
+N = length(xLag);
+
+ct = 1;
+for i=1:N
+    if i<N
+        x1=xLag(i); x2=xLag(i+1);
+        y1=yLag(i); y2=yLag(i+1);
+        dist = sqrt( (x1-x2)^2 + (y1-y2)^2 );
+        if dist < 5*ds
+            connectsMat(ct,1) = i-1; %For Cpp notation (and .vtk counting)
+            connectsMat(ct,2) = i;   %For Cpp notation (and .vtk counting)
+        ct=ct+1;
+        end
+    elseif i==N
+        x1=xLag(N); x2=xLag(1);
+        y1=yLag(N); y2=yLag(1);
+        dist = sqrt( (x1-x2)^2 + (y1-y2)^2 );
+        if dist < 5*ds
+            connectsMat(ct,1) = N-1; %For Cpp notation (and .vtk counting)
+            connectsMat(ct,2) = 0;   %For Cpp notation (and .vtk counting)
+        ct=ct+1;
+        end
+    end
 end
 
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: gives appropriate string number for filename in printing the
+% .vtk files.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+function strNUM = give_String_Number_For_VTK(num)
+
+%num: # of file to be printed
+
+if num < 10
+    strNUM = ['000' num2str(num)];
+elseif num < 100
+    strNUM = ['00' num2str(num)];
+elseif num<1000
+    strNUM = ['0' num2str(num)];
+else
+    strNUM = num2str(num);
+end
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: Computes vorticity from two matrices, U and V, where each
+% matrix is the discretized field of velocity values either for x or y,
+% respectively.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function vort = give_Me_Vorticity(U,V,dx,dy)
+
+% w = ( dv/dx - du/dy )\hat{z}
+
+%Compute dv/dx using central differencing! (maintains periodicity)
+dvdx = D(V,dx,'x');
+
+%Compute du/dy using central differencing! (maintains periodicity)
+dudy = D(U,dy,'y');
+
+%Compute vorticity
+vort = ( dvdx - dudy );
+
+%Take transpose so all lines up
+vort = vort';
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: Computes vorticity from two matrices, U and V, where each
+% matrix is the discretized field of velocity values either for x or y,
+% respectively.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function uMag = give_Me_Magnitude_Velocity(U,V)
+
+% U: x-directed velocity
+% V: y-directed velocity
+
+% Compute magnitude of velocity
+uMag = ( U.^2 + V.^2 ).^(1/2);
+ 
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: prints matrix vector data to vtk formated file
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function savevtk_points_connects( X, filename, vectorName,connectsMat)
+
+%X is matrix of size Nx3
+
+N = length( X(:,1) );
+Nc = length( connectsMat(:,1) );
+
+%TRY PRINTING THEM AS UNSTRUCTURED_GRID
+file = fopen (filename, 'w');
+fprintf(file, '# vtk DataFile Version 2.0\n');
+fprintf(file, [vectorName '\n']);
+fprintf(file, 'ASCII\n');
+fprintf(file, 'DATASET UNSTRUCTURED_GRID\n\n');
+%
+fprintf(file, 'POINTS %i float\n', N);
+for i=1:N
+    fprintf(file, '%.15e %.15e %.15e\n', X(i,1),X(i,2),X(i,3));
+end
+fprintf(file,'\n');
+%
+fprintf(file,'CELLS %i %i\n',Nc,3*Nc); %First: # of "Cells", Second: Total # of info inputed following
+for s=1:Nc
+    fprintf(file,'%i %i %i\n',2, connectsMat(s,1), connectsMat(s,2) );
+end
+fprintf(file,'\n');
+%
+fprintf(file,'CELL_TYPES %i\n',Nc); % N = # of "Cells"
+for i=1:Nc
+   fprintf(file,'3 '); 
+end
+fprintf(file,'\n');
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: prints matrix vector data to vtk formated file
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function savevtk_points( X, filename, vectorName)
+
+%X is matrix of size Nx3
+
+N = length( X(:,1) );
+
+
+%TRY PRINTING THEM AS UNSTRUCTURED_GRID
+file = fopen (filename, 'w');
+fprintf(file, '# vtk DataFile Version 2.0\n');
+fprintf(file, [vectorName '\n']);
+fprintf(file, 'ASCII\n');
+fprintf(file, 'DATASET UNSTRUCTURED_GRID\n\n');
+%
+fprintf(file, 'POINTS %i float\n', N);
+for i=1:N
+    fprintf(file, '%.15e %.15e %.15e\n', X(i,1),X(i,2),X(i,3));
+end
+fprintf(file,'\n');
+%
+fprintf(file,'CELLS %i %i\n',N,2*N); %First: # of "Cells", Second: Total # of info inputed following
+for s=0:N-1
+    fprintf(file,'%i %i\n',1,s);
+end
+fprintf(file,'\n');
+%
+fprintf(file,'CELL_TYPES %i\n',N); % N = # of "Cells"
+for i=1:N
+   fprintf(file,'1 '); 
+end
+fprintf(file,'\n');
+
+
+
+%TRY PRINTING THEM AS POLYGONAL DATA
+% file = fopen (filename, 'w');
+% fprintf(file, '# vtk DataFile Version 2.0\n');
+% fprintf(file, [vectorName '\n']);
+% fprintf(file, 'ASCII\n');
+% fprintf(file, 'DATASET STRUCTURED_GRID\n');
+% fprintf(file, 'DIMENSIONS 64 1 1\n');
+% fprintf(file, 'POINTS %i float\n', N);
+% for i=1:N
+% fprintf(file, '%.15e %.15e %.15e\n', X(i,1),X(i,2),X(i,3));
+% end
+% fprintf(file,'1.1 1.1 0\n');
+% fprintf(file,'CELL_DATA 1\n');
+% fprintf(file,'POINT_DATA %u \n',N);
+% fprintf(file,'FIELD FieldData 1\n');
+% fprintf(file,'nodal 1 %i float\n',N);
+% fprintf(file,'0 1 1.1 2\n');
+% fprintf(file,'SCALARS nodal float\n');
+% fprintf(file,['SCALARS ' vectorName ' float 1 \n']);
+% fprintf(file,'LOOKUP_TABLE default\n');
+
+
+% TRY PRINTING THEM AS POINTS
+% file = fopen (filename, 'w');
+% fprintf(file, '# vtk DataFile Version 2.0\n');
+% fprintf(file, 'Cube example\n');
+% fprintf(file, 'ASCII\n');
+% fprintf(file, 'DATASET UNSTRUCTURED_GRID\n');
+% fprintf(file, 'POINTS %i float\n', N);
+% for i=1:N
+% fprintf(file, '%.15e %.15e %.15e\n', X(i,1),X(i,2),X(i,3));
+% end
+% fprintf(file,'POINT_DATA %u \n',N);
+% fprintf(file,['SCALARS ' vectorName ' float 1 \n']);
+% fprintf(file,'LOOKUP_TABLE default\n');
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: prints matrix vector data to vtk formated file
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function savevtk_vector(X, Y, filename, vectorName,dx,dy)
+%  savevtkvector Save a 3-D vector array in VTK format
+%  savevtkvector(X,Y,Z,filename) saves a 3-D vector of any size to
+%  filename in VTK format. X, Y and Z should be arrays of the same
+%  size, each storing speeds in the a single Cartesian directions.
+    if (size(X) ~= size(Y))
+        fprint('Error: velocity arrays of unequal size\n'); return;
+    end
+    [nx, ny, nz] = size(X);
+    fid = fopen(filename, 'wt');
+    fprintf(fid, '# vtk DataFile Version 2.0\n');
+    fprintf(fid, 'Comment goes here\n');
+    fprintf(fid, 'ASCII\n');
+    fprintf(fid, '\n');
+    fprintf(fid, 'DATASET STRUCTURED_POINTS\n');
+    fprintf(fid, 'DIMENSIONS    %d   %d   %d\n', nx, ny, nz);
+    fprintf(fid, '\n');
+    fprintf(fid, 'ORIGIN    0.000   0.000   0.000\n');
+    %fprintf(fid, 'SPACING   1.000   1.000   1.000\n'); if want [1,32]x[1,32] rather than [0,Lx]x[0,Ly]
+    fprintf(fid, ['SPACING   ' num2str(dx)   num2str(dy) '   1.000\n']);
+    fprintf(fid, '\n');
+    fprintf(fid, 'POINT_DATA   %d\n', nx*ny);
+    fprintf(fid, ['VECTORS ' vectorName ' double\n']);
+    fprintf(fid, '\n');
+    for a=1:nz
+        for b=1:ny
+            for c=1:nx
+                fprintf(fid, '%f ', X(c,b,1));
+                fprintf(fid, '%f ', Y(c,b,1));
+                fprintf(fid, '%f ', 1);
+            end
+            fprintf(fid, '\n');
+        end
+    end
+    fclose(fid);
+return
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: prints scalar matrix to vtk formated file
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function savevtk_scalar(array, filename, colorMap,dx,dy)
+%  savevtk Save a 3-D scalar array in VTK format.
+%  savevtk(array, filename) saves a 3-D array of any size to
+%  filename in VTK format.
+    [nx, ny, nz] = size(array);
+    fid = fopen(filename, 'wt');
+    fprintf(fid, '# vtk DataFile Version 2.0\n');
+    fprintf(fid, 'Comment goes here\n');
+    fprintf(fid, 'ASCII\n');
+    fprintf(fid, '\n');
+    fprintf(fid, 'DATASET STRUCTURED_POINTS\n');
+    fprintf(fid, 'DIMENSIONS    %d   %d   %d\n', nx, ny, nz);
+    fprintf(fid, '\n');
+    fprintf(fid, 'ORIGIN    0.000   0.000   0.000\n');
+    %fprintf(fid, 'SPACING   1.000   1.000   1.000\n'); if want [1,32]x[1,32] rather than [0,Lx]x[0,Ly]
+    fprintf(fid, ['SPACING   ' num2str(dx)   num2str(dy) '   1.000\n']);
+    fprintf(fid, '\n');
+    fprintf(fid, 'POINT_DATA   %d\n', nx*ny*nz);
+    fprintf(fid, ['SCALARS ' colorMap ' double\n']);
+    fprintf(fid, 'LOOKUP_TABLE default\n');
+    fprintf(fid, '\n');
+    for a=1:nz
+        for b=1:ny
+            for c=1:nx
+                fprintf(fid, '%d ', array(c,b,a));
+            end
+            fprintf(fid, '\n');
+        end
+    end
+    fclose(fid);
+return
 
 
 

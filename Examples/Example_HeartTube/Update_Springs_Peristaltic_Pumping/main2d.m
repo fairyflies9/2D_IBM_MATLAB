@@ -1,3 +1,29 @@
+%-------------------------------------------------------------------------------------------------------------------%
+%
+% IB2d is an Immersed Boundary Code (IB) for solving fully coupled non-linear 
+% 	fluid-structure interaction models. This version of the code is based off of
+%	Peskin's Immersed Boundary Method Paper in Acta Numerica, 2002.
+%
+% Author: Nicholas A. Battista
+% Email:  nick.battista@unc.edu
+% Date Created: May 27th, 2015
+% Institution: UNC-CH
+%
+% This code is capable of creating Lagrangian Structures using:
+% 	1. Springs
+% 	2. Beams (*torsional springs)
+% 	3. Target Points
+%	4. Muscle-Model (combined Force-Length-Velocity model, "HIll+(Length-Tension)")
+%
+% One is able to update those Lagrangian Structure parameters, e.g., spring constants, resting %%	lengths, etc
+% 
+% There are a number of built in Examples, mostly used for teaching purposes. 
+% 
+% If you would like us %to add a specific muscle model, please let Nick (nick.battista@unc.edu) know.
+%
+%--------------------------------------------------------------------------------------------------------------------%
+
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %
 % FUNCTION: main2d is the function that gets called to run the code. It
@@ -37,6 +63,13 @@ grid_Info(4) = params(8);           % Length of Eulerian domain in y-Direction
 grid_Info(5) = params(7)/params(5); % Spatial step-size in x
 grid_Info(6) = params(8)/params(6); % Spatial step-size in y
 grid_Info(7) = params(9);           % # of pts used in delta-function support (supp/2 in each direction)
+grid_Info(8) = params(18);          % Print Dump (How often to plot)
+grid_Info(9) = params(19);          % Plot in Matlab? (1=YES,0=NO) 
+grid_Info(10) = params(20);         % Plot LAGRANGIAN PTs ONLY in Matlab
+grid_Info(11) = params(21);         % Plot LAGRANGIAN PTs + VELOCITY FIELD in Matlab
+grid_Info(12) = params(22);         % Plot LAGRANGIAN PTs + VORTICITY colormap in Matlab
+grid_Info(13) = params(23);         % Plot LAGRANGIAN PTs + MAGNITUDE OF VELOCITY colormap in Matlab
+grid_Info(14) = params(24);         % Plot LAGRANGIAN PTs + PRESSURE colormap in Matlab
 
 
 % MODEL STRUCTURE DATA STORED %
@@ -47,6 +80,7 @@ model_Info(4) = params(13);         % Update_Target_Pts: 0 (for no) or 1 (for ye
 model_Info(5) = params(14);         % Beams: 0 (for no) or 1 (for yes)
 model_Info(6) = params(15);         % Update_Beams: 0 (for no) or 1 (for yes)
 model_Info(7) = params(16);         % Muscle Activation (Length/Tension-Hill Model): % 0 (for no) or 1 (for yes)
+model_Info(8) = params(17);         % Arbirtary External Force Onto Fluid Grid
 
 
 % Path Reference to where Driving code is found %
@@ -79,5 +113,6 @@ C2 = textscan(fileID,'%s %s %s','CollectOutput',1,'CommentStyle','%');
 fclose(fileID);           %Close the data file.
 
 params = C1{2};
+
 struct_name = C2{1,1};
  

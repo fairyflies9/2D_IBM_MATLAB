@@ -67,8 +67,8 @@ pMatlab = grid_Info(9);         % Plot in Matlab? (1=YES,0=NO)
 lagPlot = grid_Info(10);        % Plot LAGRANGIAN PTs ONLY in Matlab
 velPlot = grid_Info(11);        % Plot LAGRANGIAN PTs + VELOCITY FIELD in Matlab
 vortPlot = grid_Info(12);       % Plot LAGRANGIAN PTs + VORTICITY colormap in Matlab
-pressPlot = grid_Info(13);      % Plot LAGRANGIAN PTs + MAGNITUDE OF VELOCITY colormap in Matlab
-uMagPlot = grid_Info(14);       % Plot LAGRANGIAN PTs + PRESSURE colormap in Matlab
+uMagPlot = grid_Info(13);       % Plot LAGRANGIAN PTs + MAGNITUDE OF VELOCITY colormap in Matlab
+pressPlot = grid_Info(14);      % Plot LAGRANGIAN PTs + PRESSURE colormap in Matlab
 
 
 
@@ -81,6 +81,8 @@ beams_Yes = model_Info(5);           % Beams: 0 (for no) or 1 (for yes)
 update_Beams_Flag = model_Info(6);   % Update_Beams: 0 (for no) or 1 (for yes)
 muscles_Yes = model_Info(7);         % Muscles: 0 (for no) or 1 (for yes)
 arb_ext_force_Yes = model_Info(8);   % Arbitrary External Force: 0 (for no) or 1 (for yes)
+tracers_Yes = model_Info(9);         % Tracers: 0 (for no) or 1 (for yes)
+mass_Yes = model_Info(10);           % Mass Points: 0 (for no) or 1 (for yes)
 
 %Lagrangian Structure Data
 ds = Lx / (2*Nx);                   %Lagrangian Spacing
@@ -112,6 +114,20 @@ xLag_P = xLag;              % Initialize previous Lagrangian x-Values (for use i
 yLag_P = yLag;              % Initialize previous Lagrangian y-Values (for use in muscle-model)
 
 
+% READ IN TRACERS (IF THERE ARE TRACERS) %
+if (tracers_Yes == 1)
+   [~,xT,yT] = read_Tracer_Points(struct_name);
+   tracers = zeros(length(xT),4);
+   tracers(1,1) = 1;
+   tracers(:,2) = xT;
+   tracers(:,3) = yT;
+        %tracers_info: col 1: xPt of Tracers
+        %              col 2: yPt of Tracers
+else
+   tracers = 0; 
+end
+
+
 % READ IN SPRINGS (IF THERE ARE SPRINGS) %
 if ( springs_Yes == 1 )
     springs_info = read_Spring_Points(struct_name);
@@ -138,6 +154,31 @@ if ( muscles_Yes == 1 )
         %         col 7: force maximum!
 else
     muscles_info = 0;  %just to pass placeholder into "please_Find_Lagrangian_Forces_On_Eulerian_grid function"
+end
+
+
+
+
+
+
+
+% READ IN MASS POINTS (IF THERE ARE MASS PTS) %
+if ( mass_Yes == 1)
+    mass_aux = read_Mass_Points(struct_name);
+    %target_aux: col 1: Lag Pt. ID w/ Associated Mass Pt.
+    %            col 2: "Mass-spring" stiffness parameter
+    %            col 3: "MASS" value parameter
+    mass_info(:,1) = mass_aux(:,1); %Stores Lag-Pt IDs in col vector
+    for i=1:length(mass_info(:,1))
+        id = mass_info(i,1);
+        mass_info(i,2) = xLag(id);    %Stores Original x-Lags as x-Mass Pt. Identities
+        mass_info(i,3) = yLag(id);    %Stores Original y-Lags as y-Mass Pt. Identities
+    end
+   
+    mass_info(:,4) = mass_aux(:,2);   %Stores "mass-spring" parameter 
+    mass_info(:,5) = mass_aux(:,3);   %Stores "MASS" value parameter
+else
+    mass_info = 0;
 end
 
 
@@ -180,26 +221,31 @@ end
 
 
 % Initialize the initial velocities to zero.
-U = zeros(Ny,Nx);
-V = U;
+U = zeros(Ny,Nx);                                % x-Eulerian grid velocity
+V = U;                                           % y-Eulerian grid velocity
+mVelocity = zeros( length(mass_info(:,1)), 2 );  % mass-Pt velocity 
 
 
-% ACTUAL TIME-STEPPING IBM SCHEME!
-cter = 0; ctsave = 1; firstPrint = 1; loc = 1; diffy = 1;
+% ACTUAL TIME-STEPPING IBM SCHEME! 
+%(flags for storing structure connects for printing and printing to .vtk)
+cter = 0; ctsave = 0; firstPrint = 1; loc = 1; diffy = 1;
 
 
 % CREATE VIZ_IB2D FOLDER and VISIT FILES
 mkdir('viz_IB2d');
-cd('viz_IB2d');
-vizID = fopen('dumps.visit','w');
-fprintf(vizID,'!NBLOCKS 6\n');
-cd ..
+vizID = 1; %JUST INITIALIZE BC dumps.visit isn't working correctly...yet
+%cd('viz_IB2d');
+%vizID = fopen('dumps.visit','w'); 
+%fprintf(vizID,'!NBLOCKS 6\n');
+%cd ..
 
 %Initialize Vorticity, uMagnitude, and Pressure for initial colormap
 %Print initializations to .vtk
 vort=zeros(Ny,Nx); uMag=vort; p = vort;  lagPts = [xLag yLag zeros(length(xLag),1)];
-connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag);
-print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat);
+connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag,Nx);
+print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat,tracers);
+fprintf('Current Time(s): %6.6f\n',current_time);
+ctsave = ctsave+1;
 
 
 %
@@ -209,9 +255,15 @@ print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat);
 %
 while current_time < T_FINAL
     
-    % Step 1: Update Position of Boundary of membrane at half time-step
-    % Variables end with h if it is a half-step
+    %
+    %**************** Step 1: Update Position of Boundary of membrane at half time-step *******************
+    %                           (Variables end with h if it is a half-step)
+    %
     [xLag_h, yLag_h] = please_Move_Lagrangian_Point_Positions(U, V, xLag, yLag, xLag, yLag, x, y, dt/2, grid_Info);
+    
+    if mass_Yes == 1
+       [mass_info, massLagsOld] = please_Move_Massive_Boundary(dt/2,mass_info,mVelocity); 
+    end
     
     if ( ( update_Springs_Flag == 1 ) && ( springs_Yes == 1 ) )
        springs_info = update_Springs(dt,current_time,xLag,springs_info); 
@@ -225,12 +277,26 @@ while current_time < T_FINAL
        beams_info = update_Beams(dt,current_time,beams_info); 
     end
     
+    %
+    %**************** Step 2: Calculate Force coming from membrane at half time-step ****************
+    %
+    [Fxh, Fyh, F_Mass_Bnd] =    please_Find_Lagrangian_Forces_On_Eulerian_grid(dt, current_time, xLag_h, yLag_h, xLag_P, yLag_P, x, y, grid_Info, model_Info, springs_info, target_info, beams_info, muscles_info, mass_info);
     
-    % Step 2: Calculate Force coming from membrane at half time-step
-    [Fxh, Fyh] =           please_Find_Lagrangian_Forces_On_Eulerian_grid(dt, current_time, xLag_h, yLag_h, xLag_P, yLag_P, x, y, grid_Info, model_Info, springs_info, target_info, beams_info, muscles_info);
+    % once force is calculated, can finish time-step for massive boundary
+    if mass_Yes == 1    
+        % Update Massive Boundary Velocity
+        mVelocity_h = please_Update_Massive_Boundary_Velocity(dt/2,mass_info,mVelocity,F_Mass_Bnd);
+        
+        % Update Massive Boundary Position for Time-step
+        mass_info(:,[2 3]) = massLagsOld;
+        [mass_info,~] = please_Move_Massive_Boundary(dt,mass_info,mVelocity_h); 
+
+        % Update Massive Boundary Velocity for Time-step
+        mVelocity = please_Update_Massive_Boundary_Velocity(dt,mass_info,mVelocity,F_Mass_Bnd); 
+    end
     
     if arb_ext_force_Yes == 1 
-        [Fx_Arb, Fy_Arb] = please_Compute_External_Forcing(dt, current_time, x, y, grid_Info, U, V);
+        [Fx_Arb, Fy_Arb] =    please_Compute_External_Forcing(dt, current_time, x, y, grid_Info, U, V);
         Fxh = Fxh + Fx_Arb;
         Fyh = Fyh + Fy_Arb;
     end
@@ -240,14 +306,21 @@ while current_time < T_FINAL
     [Uh, Vh, U, V, p] =   please_Update_Fluid_Velocity(U, V, Fxh, Fyh, rho, mu, grid_Info, dt);
 
     % Step 4: Update Position of Boundary of membrane again for a half time-step
-    xLag_P = xLag_h;     % Stores old Lagrangian x-Values (for muscle model)
-    yLag_P = yLag_h;     % Stores old Lagrangian y-Values (for muscle model)
+    xLag_P = xLag_h;   % Stores old Lagrangian x-Values (for muscle model)
+    yLag_P = yLag_h;   % Stores old Lagrangian y-Values (for muscle model)
     [xLag, yLag] =     please_Move_Lagrangian_Point_Positions(Uh, Vh, xLag, yLag, xLag_h, yLag_h, x, y, dt, grid_Info);
 
     
+    % If there are tracers, update tracer positions %
+    if tracers_Yes == 1
+        [xT, yT] = please_Move_Lagrangian_Point_Positions(Uh, Vh, xT, yT, xT, yT, x, y, dt, grid_Info);
+        tracers(:,2) = xT;
+        tracers(:,3) = yT;
+    end
+    
     
     % Plot Lagrangian/Eulerian Dynamics!
-    if ( ( mod(cter,pDump) == 0  ) && ( cter > pDump ) )
+    if ( ( mod(cter,pDump) == 0  ) && ( cter >= pDump ) )
         
         %Compute vorticity, uMagnitude
         vort = give_Me_Vorticity(U,V,dx,dy);
@@ -260,11 +333,12 @@ while current_time < T_FINAL
         
         %Print .vtk files!
         lagPts = [xLag yLag zeros(length(xLag),1)];
-        print_vtk_files(ctsave,vizID,vort,uMag',p',U',V',Lx,Ly,Nx,Ny,lagPts,connectsMat);
+        print_vtk_files(ctsave,vizID,vort,uMag',p',U',V',Lx,Ly,Nx,Ny,lagPts,connectsMat,tracers);
         
         %Print Current Time
         fprintf('Current Time(s): %6.6f\n',current_time);
         
+        %Update print counter for filename index
         ctsave=ctsave+1; firstPrint = 0;
         
     end
@@ -273,11 +347,12 @@ while current_time < T_FINAL
     % Update current_time value & counter
     current_time = current_time+dt;
     cter = cter + 1;
+    %pause();
     
     
 end %ENDS TIME-STEPPING LOOP
 
-fclose(vizID);
+%fclose(vizID);
 
 
 
@@ -294,7 +369,7 @@ fclose(vizID);
 %
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-function print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat)
+function print_vtk_files(ctsave,vizID,vort,uMag,p,U,V,Lx,Ly,Nx,Ny,lagPts,connectsMat,tracers)
 
 %Give spacing for grid
 dx = Lx/Nx; 
@@ -315,21 +390,26 @@ velocityName = ['u.' strNUM '.vtk'];
 lagPtsName = ['lagsPts.' strNUM '.vtk'];
 lagPtsConName=['lagPtsConnect.' strNUM '.vtk'];
 
-
 %Print Lagrangian Pts to .vtk format
 savevtk_points(lagPts, lagPtsName, 'lagPts');
 
 %Print Lagrangian Pts w/ CONNECTIONS to .vtk format
 savevtk_points_connects(lagPts, lagPtsConName, 'lagPtsConnected',connectsMat);
 
+%Print Tracer Pts (*if tracers*)
+if tracers(1,1) == 1
+    tracersPtsName = ['tracer.' strNUM '.vtk'];
+    %tMatrix = tracers(:,2:4);
+    savevtk_points(tracers(:,2:4),tracersPtsName, 'tracers'); 
+end
         
 %Print another cycle to .visit file
-fprintf(vizID,[vortfName '\n']);
-fprintf(vizID,[uMagfName '\n']);
-fprintf(vizID,[pfName '\n']);
-fprintf(vizID,[uXName '\n']);
-fprintf(vizID,[uYName '\n']);
-fprintf(vizID,[velocityName '\n']);
+%fprintf(vizID,[vortfName '\n']);
+%fprintf(vizID,[uMagfName '\n']);
+%fprintf(vizID,[pfName '\n']);
+%fprintf(vizID,[uXName '\n']);
+%fprintf(vizID,[uYName '\n']);
+%fprintf(vizID,[velocityName '\n']);
 
 
 %Print SCALAR DATA (i.e., colormap data) to .vtk file
@@ -352,9 +432,16 @@ cd ..
 %
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-function connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag)
+function connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag,Nx)
 
 N = length(xLag);
+
+if Nx > 32
+   space = 5*ds; 
+elseif Nx <= 32
+   space = 5*ds;
+end
+    
 
 ct = 1;
 for i=1:N
@@ -362,7 +449,7 @@ for i=1:N
         x1=xLag(i); x2=xLag(i+1);
         y1=yLag(i); y2=yLag(i+1);
         dist = sqrt( (x1-x2)^2 + (y1-y2)^2 );
-        if dist < 5*ds
+        if dist < space
             connectsMat(ct,1) = i-1; %For Cpp notation (and .vtk counting)
             connectsMat(ct,2) = i;   %For Cpp notation (and .vtk counting)
         ct=ct+1;
@@ -371,7 +458,7 @@ for i=1:N
         x1=xLag(N); x2=xLag(1);
         y1=yLag(N); y2=yLag(1);
         dist = sqrt( (x1-x2)^2 + (y1-y2)^2 );
-        if dist < 5*ds
+        if dist < space
             connectsMat(ct,1) = N-1; %For Cpp notation (and .vtk counting)
             connectsMat(ct,2) = 0;   %For Cpp notation (and .vtk counting)
         ct=ct+1;
@@ -484,6 +571,7 @@ for i=1:Nc
    fprintf(file,'3 '); 
 end
 fprintf(file,'\n');
+fclose(file);
 
 
 
@@ -526,6 +614,7 @@ for i=1:N
    fprintf(file,'1 '); 
 end
 fprintf(file,'\n');
+fclose(file);
 
 
 
@@ -687,6 +776,40 @@ end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %
+% FUNCTION: Reads in the # of tracer pts and all the tracer pts from the
+%           .tracer file.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function [N,xLag,yLag] = read_Tracer_Points(struct_name)
+
+filename = [struct_name '.tracer'];  %Name of file to read in
+fileID = fopen(filename);
+
+% Read in the file, use 'CollectOutput' to gather all similar data together
+% and 'CommentStyle' to to end and be able to skip lines in file.
+C = textscan(fileID,'%f %f','CollectOutput',1);
+
+
+fclose(fileID);     %Close the data file.
+
+tracers = C{1};    %Stores all read in data in vertices (N+1,2) array
+
+N = tracers(1,1);  % # of Lagrangian Pts
+xLag = zeros(N,1);  % Initialize storage for Lagrangian Pts.
+yLag = xLag;        % Initialize storage for Lagrangian Pts.
+
+for i=1:N
+   xLag(i,1) = tracers(i+1,1); %Stores x-values of Tracer Lagrangian Mesh
+   yLag(i,1) = tracers(i+1,2); %Stores y-values of Tracer Lagrangian Mesh
+   
+end
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
 % FUNCTION: Reads in the # of springs and all MASTER NODEs, SLAVE NODEs,
 %           spring STIFFNESSES, spring RESTING LENGTHS
 %
@@ -713,6 +836,37 @@ springs = spring_info(2:end,1:4);
 %         col 2: ending spring pt. (by lag. discretization)
 %         col 3: spring stiffness
 %         col 4: spring resting lengths
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% FUNCTION: Reads in the # of TARGET PTS, TARGET-PT-NODEs, and their
+%           Target-STIFFNESSES
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function masses = read_Mass_Points(struct_name)
+
+filename = [struct_name '.mass'];  %Name of file to read in
+
+fileID = fopen(filename);
+
+    % Read in the file, use 'CollectOutput' to gather all similar data together
+    % and 'CommentStyle' to to end and be able to skip lines in file.
+    C = textscan(fileID,'%f %f %f','CollectOutput',1);
+
+fclose(fileID);      %Close the data file.
+
+mass_info = C{1};    %Stores all read in data in vertices (N+1,2) array
+
+%Store all elements on .mass file into a matrix starting w/ 2nd row of read in data.
+masses = mass_info(2:end,1:3);
+
+%masses:  col 1: Lag Pt. ID w/ Associated Mass Pt.
+%         col 2: "Mass-Spring" stiffness Parameter
+%         col 3: Mass Value Parameter
+
 
 
 

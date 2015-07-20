@@ -456,10 +456,18 @@ function connectsMat = give_Me_Lag_Pt_Connects(ds,xLag,yLag,Nx)
 
 N = length(xLag);
 
-if Nx > 32
-   space = 5*ds; 
-elseif Nx <= 32
-   space = 5*ds;
+if Nx <= 32
+    space = 5*ds;
+elseif Nx <= 64 
+   space = 10*ds; 
+elseif Nx <=128
+   space = 20*ds;
+elseif Nx <=256
+    space = 40*ds;
+elseif Nx <= 512
+    space = 80*ds;
+else
+    space = 120*ds;
 end
     
 
